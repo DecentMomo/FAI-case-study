@@ -15,6 +15,7 @@ seed + policy so the exact game can be replayed:  python main.py run --seed N --
     3 innocent_wrongly_ejected   an innocent is voted out because of a (coincidental) bad alibi
     4 tie_no_elimination         the vote ends in a tie -> nobody is ejected
     5 impostor_trapped_dead_end  impostor kills in a dead-end room without a vent and is found there
+    6 missing_crewmate_last_seen a player is missing (body unfound); the vote is driven by who was last seen with them
 """
 import json
 import os
@@ -89,6 +90,19 @@ def case5(r: GameResult) -> Optional[int]:
     return None
 
 
+def case6(r: GameResult) -> Optional[int]:
+    for i, m in enumerate(r.meetings):
+        e = m["ejected"]
+        if e and m.get("missing"):
+            bd = [m["breakdown"][o][e] for o in m["breakdown"] if e in m["breakdown"][o]]
+            if not bd:
+                continue
+            avg = {k: sum(b[k] for b in bd) / len(bd) for k in ("prox", "scene", "alibi", "vent", "last_seen")}
+            if avg["last_seen"] > 0 and avg["last_seen"] == max(avg.values()):
+                return i
+    return None
+
+
 CASES: Dict[str, dict] = {
     "case1_alibi_contradiction_win": dict(pred=case1, kind="working", policies=["greedy", "random"],
         title="Working case 1: impostor identified through a contradicted alibi (seen elsewhere)"),
@@ -102,6 +116,8 @@ CASES: Dict[str, dict] = {
         title="Edge case 2: tied vote -> no elimination"),
     "case5_impostor_trapped_dead_end": dict(pred=case5, kind="edge", policies=["greedy", "random", "minimax"],
         title="Edge case 3: impostor trapped in a vent-less dead end"),
+    "case6_missing_crewmate_last_seen": dict(pred=case6, kind="edge", policies=["minimax", "greedy"],
+        title="Edge case 4: a missing crewmate (body never found) - ejection driven by 'last seen with'"),
 }
 
 
@@ -139,6 +155,9 @@ def explain_meeting(r: GameResult, idx: int) -> List[str]:
         out.append(f"  body of {b['victim']} found by {b['finder']} in {b['room']} at tick {b['found_tick']}")
     if m["killed"]:
         out.append(f"  killed this round: {m['killed']}")
+    if m.get("missing"):
+        out.append(f"  roster check: missing (body not found) = {m['missing']};  last-seen-with scores = "
+                   + ", ".join(f"{k}={v:.2f}" for k, v in sorted(m['last_with'].items(), key=lambda kv: -kv[1])))
     if m.get("frame"):
         tf, rf, z = m["frame"]
         out.append(f"  [ground truth] impostor planted a false sighting: '{z} was in {rf} at tick {tf}'")
@@ -158,7 +177,7 @@ def explain_meeting(r: GameResult, idx: int) -> List[str]:
         tag = " <== IMPOSTOR" if n == imp else ""
         out.append(f"    {n:<7} prior={avg['prior']:.2f} prox={avg['prox']:.2f} scene={avg['scene']:.2f} "
                    f"alibi={avg['alibi']:.2f} false={avg['false_testimony']:.2f} vent={avg['vent']:.2f} "
-                   f"group={avg['group']:.2f} -> posterior={avg['posterior']:.2f}{tag}")
+                   f"group={avg['group']:.2f} last_seen={avg.get('last_seen', 0):.2f} -> posterior={avg['posterior']:.2f}{tag}")
     out.append("  votes: " + ", ".join(f"{k}->{v or 'SKIP'}" for k, v in m["votes"].items()))
     out.append(f"  tally={m['tally']}  outcome={'EJECT ' + m['ejected'] if m['ejected'] else 'NO ELIMINATION'} "
                f"({m['outcome_reason']})  ejected_role={m.get('ejected_role', '-')}")

@@ -122,5 +122,35 @@ class TestGame(unittest.TestCase):
         self.assertNotEqual(row["bfs_expanded"], "")
 
 
+class TestMissing(unittest.TestCase):
+    def test_last_with_weights(self):
+        cfg = Config()
+        g = default_map()
+        tests = {n: sus.Testimony(n, {5: "Storage"}, [], []) for n in "abcd"}
+        tests["a"].sightings.append((5, "Storage", "m"))
+        ev = sus.build_evidence(tests, None, g, cfg, 0, 10, list("abcd"), ["m"])
+        # a saw m in Storage at t5; companions = a,b,c,d (all claim Storage@5) -> 1/4 each
+        self.assertAlmostEqual(ev.last_with["a"], 0.25)
+        tests2 = {"a": sus.Testimony("a", {5: "Storage"}, [(5, "Storage", "m")], []),
+                  "b": sus.Testimony("b", {5: "Admin"}, [], [])}
+        ev2 = sus.build_evidence(tests2, None, g, cfg, 0, 10, ["a", "b"], ["m"])
+        self.assertAlmostEqual(ev2.last_with["a"], 1.0)      # alone with the missing player
+        self.assertNotIn("b", ev2.last_with)
+
+    def test_missing_excludes_reported_victim_and_bodies_persist(self):
+        seen_unreported = False
+        for seed in range(60):
+            r = run_game(Config(seed=seed, compare_baselines=False))
+            for m in r.meetings:
+                if m["body"]:
+                    self.assertNotIn(m["body"]["victim"], m["missing"])
+                if m["missing"]:
+                    seen_unreported = True
+                    self.assertTrue(set(m["missing"]) <= set(m["killed"]) | set(m["missing"]))
+            if seen_unreported:
+                break
+        self.assertTrue(seen_unreported)
+
+
 if __name__ == "__main__":
     unittest.main()

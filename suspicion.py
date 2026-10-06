@@ -18,6 +18,7 @@ For every suspect x compute a log-score
                     + A_i(x)                                    # refuted alibis (see below)
                     + W_FALSE * F_i(x)                          # accusation refuted by corroborated alibi
                     + W_VENT  * vent(x)                         # seen using a vent
+                    + W_LAST  * min(1, last_with(x))            # last seen with a MISSING player
                     - W_GROUP * group(x) ]                      # seen in a group => alibi corroboration
 
 and then the NEW belief is the softmax   P_i'(x) = exp(s_i(x)) / sum_y exp(s_i(y)).
@@ -50,6 +51,8 @@ A_i(x)    refuted-alibi penalty (the SHARP rule).  A "conflict" exists when
           Every penalty is multiplied by trust_i(reporter) = 1 - TRUST_SLOPE * P_i(reporter)
           (1 for i's own first-hand data) and the total per suspect is capped at ALIBI_CAP.
 vent(x)   number of witnesses who saw x use a vent (capped at 1).
+last_with(x)  for each player missing from the meeting (dead, body not found): take the last public
+          sighting of them, list everyone placed in that room at that tick, and give each 1/(#companions).
 group(x)  fraction (capped at 1) of GROUP_FULL_TICKS ticks, inside the window, in which x was
           reported by *someone else* in a room with at least 2 other agents.
 """
@@ -94,12 +97,14 @@ class Evidence:
     conflicts: List[Conflict] = field(default_factory=list)
     vent: Dict[str, List[str]] = field(default_factory=dict)    # who -> reporters
     group: Dict[str, int] = field(default_factory=dict)
+    last_with: Dict[str, float] = field(default_factory=dict)   # 'last seen with a missing player'
     window: Tuple[int, int] = (0, 0)
 
 
 # ---------------------------------------------------------------------------
 def build_evidence(tests: Dict[str, Testimony], body: Optional[Body], smap, cfg,
-                   round_start: int, round_end: int, suspects: List[str]) -> Evidence:
+                   round_start: int, round_end: int, suspects: List[str],
+                   missing: Optional[List[str]] = None) -> Evidence:
     ev = Evidence()
     sight = defaultdict(list)            # (tick, who) -> [(reporter, room)]
     claim_at = defaultdict(dict)         # tick -> {agent: claimed room}
@@ -192,6 +197,23 @@ def build_evidence(tests: Dict[str, Testimony], body: Optional[Body], smap, cfg,
                     n += 1
                     break
         ev.group[x] = n
+
+    # ---- last seen with a missing player -------------------------------------------------
+    # t_last = latest public sighting of m; companions = everyone placed in that room at t_last
+    # (by sightings or by their own claims).  last_with[x] += 1/|companions|: being the only one
+    # with m is strong evidence, being one of a crowd is weak.
+    for m in (missing or []):
+        seen_m = [(t, room) for (t, who), lst in sight.items() if who == m for _, room in lst]
+        if not seen_m:
+            continue
+        t_last = max(t for t, _ in seen_m)
+        room = next(r for t, r in seen_m if t == t_last)
+        comp = {rep for rep, r in sight.get((t_last, m), []) if r == room}
+        comp |= {who for (t, who), lst in sight.items() if t == t_last and any(r == room for _, r in lst)}
+        comp |= {a for a, r in claim_at.get(t_last, {}).items() if r == room}
+        comp.discard(m)
+        for x in comp:
+            ev.last_with[x] = ev.last_with.get(x, 0.0) + 1.0 / len(comp)
     return ev
 
 
@@ -251,13 +273,15 @@ def update_belief(observer: str, belief: Dict[str, float], ev: Evidence, cfg,
         t_prox = cfg.w_prox * ev.prox.get(x, 0.0)
         t_scene = cfg.w_scene * ev.scene.get(x, 0.0)
         t_vent = cfg.w_vent * min(1, len(ev.vent.get(x, [])))
+        t_last = cfg.w_last_seen * min(1.0, ev.last_with.get(x, 0.0))
         t_group = -cfg.w_group * min(1.0, ev.group.get(x, 0) / max(1, cfg.group_full_ticks))
-        ev_sum = t_prox + t_scene + alibi[x] + false[x] + t_vent + t_group
+        ev_sum = t_prox + t_scene + alibi[x] + false[x] + t_vent + t_group + t_last
         score[x] = ((1 - d) * math.log(max(P[x], 1e-12)) + d * math.log(1.0 / n)
                     + gullibility * ev_sum)
         breakdown[x] = {"prior": round(P[x], 4), "prox": round(t_prox, 3), "scene": round(t_scene, 3),
                         "alibi": round(alibi[x], 3), "false_testimony": round(false[x], 3),
-                        "vent": round(t_vent, 3), "group": round(t_group, 3)}
+                        "vent": round(t_vent, 3), "group": round(t_group, 3),
+                        "last_seen": round(t_last, 3)}
     m = max(score.values())
     e = {x: math.exp(s - m) for x, s in score.items()}
     new = normalize(e)

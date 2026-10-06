@@ -47,6 +47,7 @@ class Config:
     mm_w_alibi_chk: float = 0.6          # crew reply "cross-check alibis" (scaled by witnesses of impostor)
     mm_w_witness: float = 0.6            # crew reply "bystanders testify" (crew near the kill room)
     mm_w_blend_bonus: float = 0.25       # suspicion reduction for walking into a group
+    mm_w_last_seen: float = 0.5          # crew reply 'who was last seen with the victim?'
     mm_trail_window: int = 10            # ticks: crew that saw the impostor this recently are "witnesses"
     mm_vent_wait: int = 3                # extra ticks if a crewmate stands in the vent room
     alibi_escape_window: int = 6         # ticks after a kill / vent hop whose positions the impostor lies about
@@ -59,6 +60,7 @@ class Config:
     w_scene: float = 2.5         # being seen at the body when it was found
     w_alibi: float = 2.5         # per refuted-alibi conflict ("sharp" increase)
     w_false: float = 2.0         # reporter whose accusation is refuted by a corroborated alibi
+    w_last_seen: float = 1.5     # last seen with a player who is missing from the meeting
     w_vent: float = 6.0          # seen using a vent
     w_group: float = 1.0         # (negative) seen in a group -> alibi corroboration
     w_dissent: float = 0.4       # voted against the eventual majority (slight)

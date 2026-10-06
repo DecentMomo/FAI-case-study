@@ -85,6 +85,8 @@ class Game:
         self.round_vents: List[int] = []            # ticks at which the impostor hopped through a vent
         self.bodies: List[dict] = []                # {room, victim, tick, reported}
         self.vent_arrivals: List[str] = []
+        self.round_roster: List[str] = []
+        self.meeting_missing: List[str] = []
         self.last_beliefs: Optional[dict] = None
         self.last_agg: Optional[dict] = None
         self._setup_agents()
@@ -372,6 +374,7 @@ class Game:
             "alive": {a.name: a.alive for a in self.agents.values()},
             "bodies": [b["room"] for b in self.bodies],
             "log": self.events[-14:], "chat": list(self.chat[-14:]), "chat_n": len(self.chat), "log_n": len(self.events),
+            "missing": list(self.meeting_missing) if phase == "MEETING" else [],
             "beliefs": self.last_beliefs, "agg": self.last_agg,
             "votes": None, "ejected": None,
         })
@@ -383,7 +386,10 @@ class Game:
         self.occ = {}
         self.round_kills = []
         self.round_vents = []
-        self.bodies = []
+        # unreported bodies stay where they fell and can still be found in a later round
+        self.bodies = [b for b in self.bodies if not b["reported"]]
+        self.round_roster = [a.name for a in self.alive_agents()]   # who the crew saw at round start
+        self.meeting_missing = []
         for a in self.alive_agents():
             a.room, a.edge, a.remaining = self.map.hub, None, 0
             a.clear_round_memory()
@@ -422,12 +428,23 @@ class Game:
         cfg = self.cfg
         crew = self.alive_crew()
         imp = self.impostor
-        dead_now = [v for (_, _, v) in self.round_kills]
+        dead_now = [v for (_, _, v) in self.round_kills]          # ground truth, analysis only
+        self.snapshot("MEETING", "meeting called: " + ("body reported" if body else "timer"))
+
+        # ---- roster check (public): who was at the start of the round but is not here now? -----
+        # Absence is the only way to miss a meeting, so an absent player is dead and therefore
+        # cannot be the impostor: their probability mass is removed EXPLICITLY, on its own frame.
+        gone = [n for n in self.round_roster if not self.agents[n].alive]
+        missing = [n for n in gone if not (body and n == body["victim"])]
+        self.meeting_missing = missing
+        for n in missing:
+            self.log(f"ROSTER: {n} is missing (presumed dead, body not found)")
+            self.say("", f"== Roster check: {n} did not show up - presumed dead ==")
         for c in crew:
-            c.belief = sus.remove_agents(c.belief, dead_now)
+            c.belief = sus.remove_agents(c.belief, gone)
         self.last_beliefs = {c.name: dict(c.belief) for c in crew}
         self.last_agg = sus.aggregate(self.last_beliefs)
-        self.snapshot("MEETING", "meeting called: " + ("body reported" if body else "timer"))
+        self.snapshot("MEETING", "roster check: " + (", ".join(missing) + " missing" if missing else "nobody missing"))
 
         # ---- testimonies (public) -------------------------------------------------
         tests: Dict[str, sus.Testimony] = {}
@@ -438,7 +455,7 @@ class Game:
                 tests[a.name] = self.brain.make_testimony()
         body_obj = sus.Body(body["room"], body["victim"], body["found_tick"], body["finder"]) if body else None
         suspects = [a.name for a in self.alive_agents()]
-        ev = sus.build_evidence(tests, body_obj, self.map, cfg, self.round_start, self.tick, suspects)
+        ev = sus.build_evidence(tests, body_obj, self.map, cfg, self.round_start, self.tick, suspects, missing)
 
         self._discuss(tests, body, ev, imp.name)
 
@@ -477,7 +494,8 @@ class Game:
                "breakdown": breakdowns, "beliefs": beliefs, "agg": agg, "votes": votes,
                "tally": tally, "ejected": ejected, "outcome_reason": why,
                "impostor": imp.name, "alive_before": [a.name for a in self.alive_agents()],
-               "frame": self.brain.last_frame, "killed": dead_now}
+               "frame": self.brain.last_frame, "killed": dead_now, "missing": missing,
+               "last_with": ev.last_with}
 
         # ---- resolution ----------------------------------------------------------------
         f_snap = {"votes": votes, "ejected": ejected}

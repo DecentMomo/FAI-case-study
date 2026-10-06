@@ -48,6 +48,8 @@ STATE / FEATURES used by the leaf evaluation (all computable from the visible wo
     p_caught   logistic((e - T_disc)/tau) : chance somebody walks in while I'm still at K
     prox(f)    1/(1+hops(final room, K)): crew blame whoever ends up closest to the body
     trail      fraction of crew who saw me recently (they can refute a fake alibi)
+    with_victim 1 if another crewmate recently saw me together with the victim (feeds the crew's
+               'last seen with the missing player' rule if the body is not found)
     nearby     fraction of crew within 2 hops of K (bystander testimony)
     progress   1/(alive_crew-1): share of the remaining kills this kill accomplishes
 Suspicion = w_caught*p_caught + (reply term) - (blend bonus), clipped at 0.
@@ -338,6 +340,14 @@ class ImpostorBrain:
         recent = [c for c in others if self.seen_by.get(c.name, -99) >= g.tick - cfg.mm_trail_window]
         trail = len(recent) / max(1, len(others))
         nearby = sum(1 for c in others if m.hops(c.loc, K) <= 2) / max(1, len(others))
+        # mirrors the crew's 'last seen with the missing player' rule: did any OTHER living
+        # crewmate see me together with this victim recently?  (impostor sees g.occ)
+        alive_names = {c.name for c in others}
+        with_victim = 0.0
+        for t in range(g.tick - cfg.mm_trail_window, g.tick + 1):
+            for room, names in g.occ.get(t, {}).items():
+                if self.me.name in names and victim.name in names and alive_names.intersection(names):
+                    with_victim = 1.0
 
         def suspicion(reply: str, f: dict) -> float:
             base = cfg.mm_w_caught * p_caught(f["e"])
@@ -345,7 +355,7 @@ class ImpostorBrain:
             if reply == "PROXIMITY_ACCUSE":
                 extra = cfg.mm_w_prox_acc * prox
             elif reply == "ALIBI_CROSSCHECK":
-                extra = cfg.mm_w_alibi_chk * trail
+                extra = cfg.mm_w_alibi_chk * trail + cfg.mm_w_last_seen * with_victim
             elif reply == "BYSTANDER_TESTIMONY":
                 extra = cfg.mm_w_witness * nearby
             else:
@@ -375,7 +385,7 @@ class ImpostorBrain:
         worst = min(replies, key=lambda r: replies[r]["U"])           # ply 2: crew minimises
         return {"tick": g.tick, "target": victim.name, "kill_room": K, "depth": depth,
                 "progress": round(progress, 4), "approach_cost": round(approach_cost, 3),
-                "T_disc": T_disc, "trail": round(trail, 3), "nearby": round(nearby, 3),
+                "T_disc": T_disc, "trail": round(trail, 3), "nearby": round(nearby, 3), "with_victim": with_victim,
                 "followups": {f: {"e": v["e"], "final": v["final"]} for f, v in fol.items()},
                 "replies": replies, "worst_reply": worst,
                 "escape": replies[worst]["best_escape"], "value": replies[worst]["U"]}

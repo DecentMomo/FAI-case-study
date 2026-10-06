@@ -177,6 +177,7 @@ after the vote:  s_i(x) += w_dissent   for x who voted against the eventual majo
 | proximity to a reported body | `prox(x)` = max over the window *(victim last seen alive, body found]* of `1/(1+hops(pos_x(t), body_room))`; `scene(x)` = at the body when found (the finder itself is excluded — it is there *because* it found the body) |
 | inconsistent alibi (sharp) | `A_i(x)`: conflicts of type *seen_elsewhere* (claims X, seen in Y), *absent* ("I was there, I didn't see you", weight × `absent_factor`), *impossible travel*, *self-inconsistent report*. Blame goes to the claimant if the sighting is corroborated, to the reporter if the claim is corroborated, otherwise it is **split in proportion to the current beliefs**. Scaled by `trust(reporter) = 1 − P_i(reporter)`; capped by `alibi_cap` |
 | voting against the majority | `w_dissent` (slight) |
+| last seen with a missing player | `last_with(x)`: players missing from the meeting are known dead (roster check, announced in chat/log on its own frame). For each, everyone placed with them at their last sighting gets `1/#companions`; term `w_last_seen·min(1, last_with)` |
 | seen in a group, no kill | `group(x)` reduces suspicion; needs sightings by *someone else* in a room of ≥ 3 |
 | uncertainty / disagreement | per-crewmate gullibility `g_i ~ N(1, 0.25)` and imperfect memory (`memory_prob`): a forgotten sighting looks like a missing alibi |
 
@@ -203,9 +204,10 @@ the full event log and (for the smart impostor) its Minimax decisions.
 | 3 | An innocent is voted out because of a coincidental bad alibi (a forgotten sighting / false testimony) | edge |
 | 4 | Tied vote → nobody ejected | edge |
 | 5 | Impostor kills in the vent-less dead end `Comms`, is still standing there when the body is found | edge |
+| 6 | A crewmate is **missing** at the meeting (body never found); the vote is driven by who was last seen with them | edge |
 
 Typical outputs (seed numbers can change if you change any config value): `python main.py run --seed 5 --impostor greedy`,
-`--seed 3 --impostor minimax`, … — see `outputs/cases/summary.json`.
+`--seed 4 --impostor minimax`, … — see `outputs/cases/summary.json`.
 
 ## 6. Experiments (`python main.py experiments`, ~2 min; `--quick` ≈ 10 s)
 * `heuristic_study` — A\* with each heuristic vs BFS/Dijkstra on all room pairs of the 10-room map (with and without
@@ -214,10 +216,9 @@ Typical outputs (seed numbers can change if you change any config value): `pytho
   computation per tick (task phase) and per meeting. *Timings include running the BFS+Dijkstra baselines next to every A\* call
   (`--no-baselines` disables that) and are wall-clock, so they vary a little between machines.*
 * `policy_study` — smart (depth 1/2/3), greedy, random impostor, 200 games each, Wilson 95 % CIs.
-  Reference run (200 games): random 0 %, greedy 0.5 %, minimax 30.5 / 30.5 / 34.5 % impostor wins for depth 1/2/3.
+  Reference run (200 games): random 0.5 %, greedy 1 %, minimax 25.5 / 31 / 40.5 % impostor wins for depth 1/2/3 (with the missing-player rule, deeper search now pays off because the tree models "was I seen with the victim?").
   The dumb impostors are caught almost every time; most of the smart impostor's advantage comes from
-  unwitnessed venting, unrefutable alibis and misdirection, and the *depth* effect is small and within the
-  confidence intervals in this environment — report that honestly rather than as a big win for depth 3.
+  unwitnessed venting, unrefutable alibis and misdirection, and depth 1 vs 3 differs by about 15 points; the 95 % intervals still overlap for neighbouring depths, so quote them.
 
 ## 7. Modelling assumptions / limitations (be ready to state these)
 * Discrete ticks; agents see each other only inside a room at the end of a tick; the viewer is omniscient.
@@ -226,4 +227,5 @@ Typical outputs (seed numbers can change if you change any config value): `pytho
 * Memory noise (`memory_prob`) deliberately produces some *false* alibi conflicts for innocents — that is the source of
   the "wrongly ejected" edge case. Set `memory_prob=1.0` to remove it.
 * Weights are hand-set and tuned for a sensible balance (not learned); `Config` exposes all of them.
+* An unreported kill is handled by a roster check at the next meeting: a player who was present at round start but is absent is treated as dead (as in Among Us) and removed from beliefs on a labelled step. Unreported bodies stay on the map and can be found in later rounds.
 * Bodies are reported only by crewmates; the impostor never self-reports; roles are not revealed on ejection.
