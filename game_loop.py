@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 from agents import Agent, Task, PALETTE
 from config import Config
 from impostor_ai import ImpostorBrain
-from search import a_star, bfs, dijkstra, SearchLog
+from search import a_star, bfs, dijkstra, SearchLog, suspect_averse_cost
 from ship_map import build_map
 import suspicion as sus
 
@@ -197,6 +197,26 @@ class Game:
                 c.vent_seen.append((tick, room, imp.name))
                 self.stats["vent_witnessed"] += 1
                 self.log(f"{c.name} SAW {imp.name} use a vent in {room}")
+                self._alarm(c, imp.name)
+
+    def _alarm(self, c: Agent, suspect: str):
+        """Cautious crew: seeing a vent hop immediately (and privately) makes `suspect` the prime suspect."""
+        if self.cfg.crew_policy == "cautious":
+            c.belief = sus.set_suspect(c.belief, suspect, self.cfg.alarm_belief)
+
+    def crew_suspect(self, a: Agent) -> Optional[str]:
+        """Who does this crewmate currently avoid?  Its argmax suspect if P >= avoid_threshold."""
+        if self.cfg.crew_policy != "cautious" or not a.belief:
+            return None
+        x, p = max(sorted(a.belief.items()), key=lambda kv: kv[1])
+        return x if p >= self.cfg.avoid_threshold else None
+
+    def _last_seen_room(self, a: Agent, who: str) -> Optional[str]:
+        """Where did I last SEE `who` (within suspect_memory ticks)?  A crewmate never knows more."""
+        for (t, room, other) in reversed(a.seen):
+            if other == who and t >= self.tick - self.cfg.suspect_memory:
+                return room
+        return None
 
     def agent_step(self, a: Agent):
         if a.remaining > 0:
@@ -211,6 +231,19 @@ class Game:
         task = a.current_task()
         if task is None:
             return                                     # all tasks done: stand still
+        suspect = self.crew_suspect(a)
+        cost_fn = None
+        if suspect is not None:
+            # FLEE RULE: never stay alone with my prime suspect (leave for the hub, where people gather)
+            others = [o for o in self.alive_agents() if o is not a and o.room == a.room]
+            if len(others) == 1 and others[0].name == suspect and a.room != self.map.hub:
+                self.stats["flee_moves"] += 1
+                self.plan_path(a, self.map.hub, "flee")
+                if a.plan:
+                    self.depart(a, a.plan.pop(0))
+                    return
+            # SUSPECT-AVERSE ROUTING: A* with extra cost for the room the suspect was last seen in
+            cost_fn = suspect_averse_cost(self._last_seen_room(a, suspect), self.cfg.suspect_penalty)
         if a.room == task.room:
             task.progress += 1
             if task.progress >= task.duration:
@@ -220,7 +253,7 @@ class Game:
                 self.log(f"{a.name} finished a task in {a.room} ({a.tasks_done()}/{len(a.tasks)})")
             return
         if a.goal != task.room or not a.plan:
-            self.plan_path(a, task.room, "task")
+            self.plan_path(a, task.room, "task", cost_fn=cost_fn)
         if a.plan:
             self.depart(a, a.plan.pop(0))
 
@@ -278,6 +311,7 @@ class Game:
                         c.vent_seen.append((self.tick, imp.room, imp.name))
                         self.stats["vent_witnessed"] += 1
                         self.log(f"{c.name} SAW {imp.name} pop out of a vent in {imp.room}")
+                        self._alarm(c, imp.name)
         self.vent_arrivals = []
 
     def check_discovery(self) -> Optional[dict]:

@@ -72,6 +72,7 @@ class ImpostorBrain:
         self.game, self.me, self.cfg = game, me, game.cfg
         self.policy = self.cfg.impostor_policy
         self.smart = self.policy == "minimax"
+        self.vent_safe = self.smart and self.cfg.imp_vent_safe
         self.seen_by: Dict[str, int] = {}     # crew name -> last tick we shared a room
         self.mode = "normal"                  # "normal" | "escape"
         self.escape_kind: Optional[str] = None
@@ -118,7 +119,7 @@ class ImpostorBrain:
         if not me.plan:
             return ("wait",)
         step = me.plan[0]
-        if step[2] and self.smart and (self._watched(me.room) or self._watched(step[0])):
+        if step[2] and self.vent_safe and (self._watched(me.room) or self._watched(step[0])):
             self._replan(goal, purpose, False)     # never vent in front of a witness
             if not me.plan:
                 return ("wait",)
@@ -255,12 +256,12 @@ class ImpostorBrain:
                 kind = self.escape_kind = "WALK"
             elif me.room in vrooms:
                 exits = sorted(m.vent_adj[me.room])
-                if self.smart:
+                if self.vent_safe:
                     exits = [r for r in exits if not self._watched(r)]
-                if self.smart and (self._watched(me.room) or not exits):
+                if self.vent_safe and (self._watched(me.room) or not exits):
                     kind = self.escape_kind = "BLEND"          # someone is watching: don't vent
                 else:
-                    if self.smart:
+                    if self.vent_safe:
                         ex = max(exits, key=lambda r: (m.hops(r, K), r))
                     else:
                         ex = g.rng.choice(exits)
@@ -398,10 +399,10 @@ class ImpostorBrain:
         claims = dict(me.track)
         sightings = list(me.seen)
         kills = g.round_kills
-        if kills:
+        if kills and (self.cfg.imp_lie or not self.smart):
             replaced = self._lie_about_alibi(claims)
             sightings = [s for s in sightings if s[0] not in replaced]
-            if self.smart and g.rng.random() < self.cfg.frame_probability:
+            if self.smart and self.cfg.imp_frame and g.rng.random() < self.cfg.frame_probability:
                 self._frame(claims, sightings)
         return Testimony(me.name, claims, sightings, [])
 
@@ -535,7 +536,7 @@ class ImpostorBrain:
     def choose_vote(self, votes: Dict[str, Optional[str]], agg: Dict[str, float]) -> Optional[str]:
         g, me = self.game, self.me
         others = [a.name for a in g.alive_agents() if a is not me]
-        if not self.smart:
+        if not self.smart or not self.cfg.imp_bandwagon:
             return g.rng.choice(others)
         # bandwagon: vote with the leading crew vote (avoids the 'dissenter' penalty and
         # pushes the crew towards ejecting an innocent).  If the crew is about to pick me,

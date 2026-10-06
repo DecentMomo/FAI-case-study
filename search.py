@@ -64,6 +64,8 @@ class SearchResult:
     max_frontier: int
     micros: float
     trace: Optional[List[dict]] = None       # expansion order (only if trace=True)
+    iterations: int = 0                      # IDA*: number of f-bound iterations
+    parents: Optional[Dict[str, str]] = None # search-tree edges child -> parent (only if trace=True)
 
 
 # -------------------------------------------------------------- heuristics
@@ -132,6 +134,17 @@ def crowd_averse_cost(crowd: Dict[str, int], penalty: float) -> CostFn:
     return fn
 
 
+def suspect_averse_cost(room: Optional[str], penalty: float) -> Optional[CostFn]:
+    """Crew cost function: entering the room where my suspect was last seen costs `penalty` extra.
+    Only ever ADDS cost, so the admissible heuristics stay admissible."""
+    if room is None:
+        return None
+
+    def fn(u, v, base, is_vent):
+        return base + (penalty if v == room else 0.0)
+    return fn
+
+
 def _step_cost(cost_fn, u, v, base, is_vent):
     c = cost_fn(u, v, base, is_vent) if cost_fn else base
     if c + 1e-12 < base:
@@ -175,8 +188,11 @@ def a_star(g: ShipMap, start: str, goal: str, heuristic: str = "euclidean",
                 heapq.heappush(open_heap, (ng + h(g, nb, goal, allow_vents), counter, ng, nb))
                 max_frontier = max(max_frontier, len(open_heap))
     path, steps, cost = _reconstruct(start, goal, parent, found, best_g)
-    return SearchResult("A*", heuristic, start, goal, found, path, steps, cost, expanded,
-                        generated, max_frontier, (time.perf_counter() - t0) * 1e6, tr)
+    res = SearchResult("A*", heuristic, start, goal, found, path, steps, cost, expanded,
+                       generated, max_frontier, (time.perf_counter() - t0) * 1e6, tr)
+    if trace:
+        res.parents = {k: v[0] for k, v in parent.items()}
+    return res
 
 
 def _reconstruct(start, goal, parent, found, best_g):
@@ -243,6 +259,92 @@ def compare_searches(g, start, goal, heuristic="euclidean", cost_fn=None, allow_
     return {"astar": a_star(g, start, goal, heuristic, cost_fn, allow_vents),
             "bfs": bfs(g, start, goal, cost_fn, allow_vents),
             "dijkstra": dijkstra(g, start, goal, cost_fn, allow_vents)}
+
+
+# ---------------------------------------------------------- more baselines
+def ida_star(g: ShipMap, start: str, goal: str, heuristic: str = "euclidean",
+             cost_fn: Optional[CostFn] = None, allow_vents: bool = False) -> SearchResult:
+    """Iterative-deepening A*: depth-first search limited by an f = g + h BOUND that grows to the
+    smallest f that exceeded the previous bound.  Memory is O(d) (only the current path is kept) but
+    nodes are RE-EXPANDED on every iteration.  `max_frontier` reports the deepest path (memory proxy)
+    and `iterations` the number of bound increases.  Optimal for an admissible heuristic."""
+    t0 = time.perf_counter()
+    h = HEURISTICS[heuristic].fn
+    path, steps = [start], []
+    stats = {"exp": 0, "gen": 1, "depth": 1, "cost": INF}
+
+    def dfs(node, gc, bound):
+        f = gc + h(g, node, goal, allow_vents)
+        if f > bound + 1e-12:
+            return f, False
+        stats["exp"] += 1
+        stats["depth"] = max(stats["depth"], len(path))
+        if node == goal:
+            stats["cost"] = gc
+            return f, True
+        nxt = INF
+        for nb, base, is_vent in g.neighbors(node, allow_vents):
+            if nb in path:
+                continue                      # no cycles on the current path
+            stats["gen"] += 1
+            c = _step_cost(cost_fn, node, nb, base, is_vent)
+            path.append(nb)
+            steps.append((nb, base, is_vent))
+            t, found = dfs(nb, gc + c, bound)
+            if found:
+                return t, True
+            path.pop()
+            steps.pop()
+            nxt = min(nxt, t)
+        return nxt, False
+
+    bound = h(g, start, goal, allow_vents)
+    iterations, found = 0, False
+    while bound < INF:
+        iterations += 1
+        bound, found = dfs(start, 0.0, bound)
+        if found:
+            break
+    return SearchResult("IDA*", heuristic, start, goal, found, list(path) if found else [],
+                        list(steps) if found else [], stats["cost"] if found else INF,
+                        stats["exp"], stats["gen"], stats["depth"], (time.perf_counter() - t0) * 1e6,
+                        None, iterations)
+
+
+def greedy_best_first(g: ShipMap, start: str, goal: str, heuristic: str = "euclidean",
+                      cost_fn: Optional[CostFn] = None, allow_vents: bool = False) -> SearchResult:
+    """Greedy best-first: priority = h(n) only (ignores the cost already paid).  Fast, but the path
+    it returns is NOT guaranteed optimal.  Reported cost is the true weighted cost of that path."""
+    t0 = time.perf_counter()
+    h = HEURISTICS[heuristic].fn
+    parent: Dict[str, Tuple[str, float, bool]] = {}
+    gscore = {start: 0.0}
+    seen = {start}
+    counter = 0
+    heap = [(h(g, start, goal, allow_vents), counter, start)]
+    expanded, generated, max_frontier, found = 0, 1, 1, False
+    closed = set()
+    while heap:
+        _, _, cur = heapq.heappop(heap)
+        if cur in closed:
+            continue
+        closed.add(cur)
+        expanded += 1
+        if cur == goal:
+            found = True
+            break
+        for nb, base, is_vent in g.neighbors(cur, allow_vents):
+            if nb not in seen:
+                seen.add(nb)
+                parent[nb] = (cur, base, is_vent)
+                gscore[nb] = gscore[cur] + _step_cost(cost_fn, cur, nb, base, is_vent)
+                counter += 1
+                generated += 1
+                heapq.heappush(heap, (h(g, nb, goal, allow_vents), counter, nb))
+                max_frontier = max(max_frontier, len(heap))
+    path, steps, cost = _reconstruct(start, goal, parent, found, gscore)
+    return SearchResult("Greedy", heuristic, start, goal, found, path, steps, cost, expanded,
+                        generated, max_frontier, (time.perf_counter() - t0) * 1e6)
 
 
 # -------------------------------------------------------------- logging

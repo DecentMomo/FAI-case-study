@@ -27,12 +27,32 @@ def add_game_args(p):
     p.add_argument("--heuristic", choices=list(HEURISTICS), default="euclidean", help="A* heuristic")
     p.add_argument("--tasks", type=int, default=None, help="tasks per crewmate")
     p.add_argument("--round-ticks", type=int, default=None)
+    p.add_argument("--crew-policy", choices=["tasks", "cautious"], default="tasks",
+                   help="crew movement: tasks only, or cautious (flee/avoid the top suspect)")
+    p.add_argument("--config", default=None, help="JSON preset (see presets/); typed flags override it")
     p.add_argument("--no-baselines", action="store_true", help="do not run BFS/Dijkstra next to every A* call")
 
 
 def cfg_from(a, **extra) -> Config:
+    if getattr(a, "config", None):
+        base = Config.from_json(a.config)           # preset file; explicit CLI flags below still override it
+    else:
+        base = None
     cfg = Config(n_crew=a.crew, n_rooms=a.rooms, seed=a.seed, impostor_policy=a.impostor,
-                 minimax_depth=a.depth, heuristic=a.heuristic, compare_baselines=not a.no_baselines)
+                 minimax_depth=a.depth, heuristic=a.heuristic, crew_policy=a.crew_policy, compare_baselines=not a.no_baselines)
+    if base is not None:
+        # keep every preset value except the flags the user actually typed
+        defaults = {"crew": 7, "rooms": 10, "seed": 0, "impostor": "minimax", "depth": 3, "heuristic": "euclidean"}
+        pairs = {"crew": "n_crew", "rooms": "n_rooms", "seed": "seed", "impostor": "impostor_policy",
+                 "depth": "minimax_depth", "heuristic": "heuristic"}
+        for flag, field in pairs.items():
+            if getattr(a, flag) == defaults[flag]:
+                setattr(cfg, field, getattr(base, field))
+        for field in base.__dataclass_fields__:
+            if field not in pairs.values() and field not in ("compare_baselines", "record_frames", "verbose"):
+                setattr(cfg, field, getattr(base, field))
+        if a.crew_policy == "tasks":
+            cfg.crew_policy = base.crew_policy
     if a.tasks is not None:
         cfg.tasks_per_crew = a.tasks
     if a.round_ticks is not None:
@@ -75,25 +95,35 @@ def cmd_run(a):
 
 def cmd_cases(a):
     from scenarios import run_cases
-    run_cases(a.max_seeds, os.path.join(a.out, "cases"), gifs=a.gifs)
+    base = Config.from_json(a.config) if a.config else None
+    run_cases(a.max_seeds, os.path.join(a.out, "cases"), gifs=a.gifs, base=base)
 
 
 def cmd_experiments(a):
     import experiments
-    experiments.run_all(a.out, quick=a.quick)
+    experiments.run_all(a.out, quick=a.quick, jobs=a.jobs, which=a.only.split(",") if a.only else None)
 
 
 def cmd_compare(a):
     import experiments
-    experiments.policy_study(a.out, games=a.games)
+    base = Config.from_json(a.config) if a.config else None
+    experiments.policy_study(a.out, games=a.games, jobs=a.jobs, base=base)
 
 
 def cmd_trace(a):
     from search import a_star, bfs, print_trace
     from ship_map import default_map
     g = default_map()
-    r = a_star(g, a.start, a.goal, a.heuristic, None, a.vents, trace=True)
-    print_trace(r)
+    if a.algo == "astar":
+        r = a_star(g, a.start, a.goal, a.heuristic, None, a.vents, trace=True)
+        print_trace(r)
+    else:
+        from search import ida_star, greedy_best_first
+        fn = ida_star if a.algo == "ida" else greedy_best_first
+        r = fn(g, a.start, a.goal, a.heuristic, None, a.vents)
+        extra = f" iterations={r.iterations}" if a.algo == "ida" else ""
+        print(f"{r.algo}: path={' -> '.join(r.path)} cost={r.cost:.2f} expanded={r.expanded} "
+              f"generated={r.generated} memory(max depth/frontier)={r.max_frontier}{extra}")
     b = bfs(g, a.start, a.goal, None, a.vents)
     print(f"BFS: path={' -> '.join(b.path)} cost={b.cost:.2f} expanded={b.expanded}")
 
@@ -115,16 +145,21 @@ def main(argv=None):
     p = sub.add_parser("cases", help="find and log the required working / edge cases")
     p.add_argument("--max-seeds", type=int, default=1500)
     p.add_argument("--gifs", action="store_true", help="also export an animated GIF per case (slow)")
+    p.add_argument("--config", default=None, help="JSON preset used as the base config")
     p.add_argument("--out", default="outputs")
     p.set_defaults(fn=cmd_cases)
 
     p = sub.add_parser("experiments", help="complexity / comparison studies (CSV + PNG)")
     p.add_argument("--quick", action="store_true")
+    p.add_argument("--jobs", type=int, default=1, help="parallel worker processes (results identical to --jobs 1)")
+    p.add_argument("--only", default=None, help="comma list: heuristic,scaling,policy,belief,ablation,sensitivity,crew")
     p.add_argument("--out", default="outputs")
     p.set_defaults(fn=cmd_experiments)
 
     p = sub.add_parser("compare", help="smart vs dumb impostor win rates")
     p.add_argument("--games", type=int, default=200)
+    p.add_argument("--jobs", type=int, default=1)
+    p.add_argument("--config", default=None, help="JSON preset used as the base config")
     p.add_argument("--out", default="outputs")
     p.set_defaults(fn=cmd_compare)
 
@@ -133,6 +168,7 @@ def main(argv=None):
     p.add_argument("--goal", default="Navigation")
     p.add_argument("--heuristic", choices=list(HEURISTICS), default="euclidean")
     p.add_argument("--vents", action="store_true", help="allow vent edges (impostor graph)")
+    p.add_argument("--algo", choices=["astar", "ida", "greedy"], default="astar", help="which search to trace/print")
     p.set_defaults(fn=cmd_trace)
 
     a = ap.parse_args(argv)

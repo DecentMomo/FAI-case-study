@@ -11,8 +11,9 @@ Bottom-right : round-by-round outcome log (last events), plus votes / ejection b
 The animation replays frames recorded by the engine (Config.record_frames=True), so the simulation
 itself is never slowed down or altered by drawing.
 
-Mouse wheel over the CHAT or EVENT LOG box scrolls back through history (anchored, so new lines do not
-shove the view); F jumps back to live.  SPACE pause/resume.   Use --save file.gif (needs pillow) to export instead of opening a window.
+Buttons: Prev / Pause-Play / Next / Next meeting + a speed slider (ms per frame); keys: LEFT/RIGHT step,
+SPACE pause/resume.  Mouse wheel over the CHAT or EVENT LOG box scrolls back through history (anchored, so
+new lines do not shove the view); F jumps back to live.  Vote frames draw an arrow from each voter to its target.   Use --save file.gif (needs pillow) to export instead of opening a window.
 """
 import math
 from typing import Optional
@@ -37,7 +38,7 @@ def animate(result, reveal: bool = True, interval: int = 600, save: Optional[str
     imp = result.impostor
 
     fig = plt.figure(figsize=(14, 7.6))
-    gs = fig.add_gridspec(3, 2, width_ratios=[1.2, 1.0], height_ratios=[1.0, 1.15, 0.55], hspace=0.5, wspace=0.1)
+    gs = fig.add_gridspec(3, 2, width_ratios=[1.2, 1.0], height_ratios=[1.0, 1.15, 0.55], hspace=0.5, wspace=0.1, bottom=0.11)
     axm = fig.add_subplot(gs[:, 0])
     axh = fig.add_subplot(gs[0, 1])
     axc = fig.add_subplot(gs[1, 1])
@@ -154,6 +155,9 @@ def animate(result, reveal: bool = True, interval: int = 600, save: Optional[str
         refresh_text(view["frame"])
         fig.canvas.draw_idle()
 
+    arrows = []
+    ptmap = {}
+
     def draw(i):
         f = frames[i]
         pts, cols, szs = [], [], []
@@ -166,6 +170,8 @@ def animate(result, reveal: bool = True, interval: int = 600, save: Optional[str
             szs.append(170 if alive else 60)
             labels[k].set_position((x + ox, y + oy + 0.13))
             labels[k].set_text(nm if alive else "")
+        ptmap.clear()
+        ptmap.update({nm: pts[k] for k, nm in enumerate(names)})
         sc.set_offsets(pts)
         sc.set_facecolor(cols)
         sc.set_sizes(szs)
@@ -182,15 +188,19 @@ def animate(result, reveal: bool = True, interval: int = 600, save: Optional[str
         if B:
             for r_i, obs in enumerate(rows[:-1]):
                 if obs == imp and not reveal and B:
-                    # hide the impostor: its row shows a flat decoy so the audience cannot spot it
-                    cols_ = [x for x in names if x != imp and any(x in b for b in B.values())]
-                    for c_i, sus_ in enumerate(names):
-                        if sus_ in cols_:
-                            Mx[r_i, c_i] = 1.0 / len(cols_)
+                    continue                      # filled below from the other rows
                 elif obs in B:
                     for c_i, sus_ in enumerate(names):
                         if sus_ in B[obs]:
                             Mx[r_i, c_i] = B[obs][sus_]
+            if not reveal and imp in rows:
+                # hide the impostor: its row is the column-wise mean of the real crew rows (it is not a
+                # real belief; it just has to look like one) and its own column stays empty
+                ir = rows.index(imp)
+                for c_i in range(len(names)):
+                    vals = [Mx[r_i, c_i] for r_i in range(len(rows) - 1) if r_i != ir and not np.isnan(Mx[r_i, c_i])]
+                    if vals and names[c_i] != imp:
+                        Mx[ir, c_i] = sum(vals) / len(vals)
             A = f.get("agg") or {}
             for c_i, sus_ in enumerate(names):
                 if sus_ in A:
@@ -200,6 +210,19 @@ def animate(result, reveal: bool = True, interval: int = 600, save: Optional[str
             for c_i in range(len(names)):
                 v = Mx[r_i, c_i]
                 cell_txt[r_i][c_i].set_text("" if np.isnan(v) else f"{v:.2f}")
+        for lab, nm in zip(axh.get_xticklabels(), names):
+            lab.set_color("#aaaaaa" if not f["alive"][nm] else "black")
+        for lab, nm in zip(axh.get_yticklabels(), rows):
+            lab.set_color("#aaaaaa" if (nm in f["alive"] and not f["alive"][nm]) else "black")
+        for a_ in arrows:
+            a_.remove()
+        arrows.clear()
+        if f.get("votes"):
+            for voter, target in f["votes"].items():
+                if target and voter in ptmap and target in ptmap:
+                    arrows.append(axm.annotate("", xy=ptmap[target], xytext=ptmap[voter], zorder=8,
+                                               arrowprops=dict(arrowstyle="->", color=colors[voter], lw=1.5,
+                                                               alpha=0.85, shrinkA=7, shrinkB=7)))
         refresh_text(i)
         if f.get("votes") is not None:
             e = f.get("ejected")
@@ -208,20 +231,71 @@ def animate(result, reveal: bool = True, interval: int = 600, save: Optional[str
             banner.set_text("BODY REPORTED" if f["label"].startswith("BODY") else "")
         return sc, body_sc, im
 
-    anim = FuncAnimation(fig, draw, frames=len(frames), interval=interval, blit=False, repeat=loop)
-    paused = {"v": False}
+    interactive = not save
+    state = {"i": 0, "playing": True}
+    meeting_starts = [k for k, fr in enumerate(frames) if fr["label"].startswith("meeting called")]
+    if interactive:
+        import itertools
+
+        def step(_):
+            if state["playing"] and state["i"] < len(frames) - 1:
+                state["i"] += 1
+            draw(state["i"])
+        anim = FuncAnimation(fig, step, frames=itertools.count(), interval=interval, blit=False,
+                             cache_frame_data=False)
+    else:
+        anim = FuncAnimation(fig, draw, frames=len(frames), interval=interval, blit=False, repeat=loop)
+    anim.draw_frame = draw
+
+    def goto(k):
+        state["i"] = max(0, min(len(frames) - 1, k))
+        draw(state["i"])
+        fig.canvas.draw_idle()
+
+    def toggle(_=None):
+        state["playing"] = not state["playing"]
+        if "play_btn" in ctl:
+            ctl["play_btn"].label.set_text("Play" if not state["playing"] else "Pause")
+        fig.canvas.draw_idle()
+
+    def manual(delta):
+        state["playing"] = False
+        if "play_btn" in ctl:
+            ctl["play_btn"].label.set_text("Play")
+        goto(state["i"] + delta)
+
+    def next_meeting(_=None):
+        state["playing"] = False
+        nxt = [k for k in meeting_starts if k > state["i"]]
+        goto(nxt[0] if nxt else len(frames) - 1)
+
+    ctl = {}
+    if interactive:
+        from matplotlib.widgets import Button, Slider
+        specs = [("prev", "<< Prev", 0.05), ("play", "Pause", 0.13), ("next", "Next >>", 0.21), ("meet", "Next meeting", 0.29)]
+        for key, label, x0 in specs:
+            axb = fig.add_axes([x0, 0.02, 0.075 if key != "meet" else 0.1, 0.05])
+            btn = Button(axb, label)
+            ctl[key + "_btn"] = btn
+        ctl["prev_btn"].on_clicked(lambda e: manual(-1))
+        ctl["next_btn"].on_clicked(lambda e: manual(+1))
+        ctl["play_btn"].on_clicked(toggle)
+        ctl["meet_btn"].on_clicked(next_meeting)
+        axs = fig.add_axes([0.55, 0.03, 0.25, 0.03])
+        ctl["speed"] = Slider(axs, "ms / frame", 100, 2000, valinit=interval, valstep=50)
+        ctl["speed"].on_changed(lambda val: setattr(anim.event_source, "interval", val))
 
     def on_key(ev):
         if ev.key in ("f", "F", "end"):
             view["chat"] = view["log"] = None
             refresh_text(view["frame"])
             fig.canvas.draw_idle()
-        if ev.key == " ":
-            if paused["v"]:
-                anim.resume()
-            else:
-                anim.pause()
-            paused["v"] = not paused["v"]
+        elif ev.key == " ":
+            toggle()
+        elif ev.key == "right":
+            manual(+1)
+        elif ev.key == "left":
+            manual(-1)
     fig.canvas.mpl_connect("key_press_event", on_key)
     fig.canvas.mpl_connect("scroll_event", on_scroll)
     fig.suptitle(f"Social deduction under uncertainty  -  impostor policy: {result.cfg.impostor_policy}"

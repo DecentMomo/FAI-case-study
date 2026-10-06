@@ -28,6 +28,13 @@ class Config:
     edge_speed: float = 1.0      # corridor cost units travelled per tick (ticks = ceil(cost/speed))
     vent_cost: float = 1.0       # cost of one vent hop (1 tick)
 
+    # ----------------------------------------------------------- crew behaviour
+    crew_policy: str = "tasks"   # "tasks" = just do tasks | "cautious" = belief-aware movement
+    avoid_threshold: float = 0.35    # cautious: a crewmate avoids its top suspect once P(suspect) >= this
+    suspect_penalty: float = 3.0     # cautious: extra A* cost for entering the room the suspect was last seen in
+    suspect_memory: int = 6          # cautious: ticks a last-seen position stays usable
+    alarm_belief: float = 0.9        # cautious: belief set on someone seen using a vent (private, immediate)
+
     # ----------------------------------------------------------------- search
     heuristic: str = "euclidean"         # key of search.HEURISTICS used by every A* call
     compare_baselines: bool = True       # also run BFS + Dijkstra on every A* query and log them
@@ -52,6 +59,10 @@ class Config:
     mm_vent_wait: int = 3                # extra ticks if a crewmate stands in the vent room
     alibi_escape_window: int = 6         # ticks after a kill / vent hop whose positions the impostor lies about
     alibi_lookback: int = 8              # ticks BEFORE a kill / vent hop it also lies about (room to build a feasible story)
+    imp_lie: bool = True                 # ablation switch: smart impostor lies about its alibi
+    imp_frame: bool = True               # ablation switch: plants a false sighting
+    imp_vent_safe: bool = True           # ablation switch: never vents in front of / into a watched room
+    imp_bandwagon: bool = True           # ablation switch: votes with the crew majority
     frame_probability: float = 1.0       # smart impostor: chance to plant a false sighting on a crewmate
 
     # -------------------------------------------- crew belief / suspicion rules
@@ -82,6 +93,19 @@ class Config:
     # ---------------------------------------------------------------- outputs
     record_frames: bool = False  # keep per-tick frames for the animation
     verbose: bool = False        # print the narrative while the game runs
+
+    @classmethod
+    def from_json(cls, path: str, **overrides) -> "Config":
+        """Load a preset: a JSON object whose keys are Config field names (unknown keys are an error)."""
+        import json
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        known = set(cls.__dataclass_fields__)
+        bad = sorted(set(data) - known)
+        if bad:
+            raise ValueError(f"unknown Config field(s) in {path}: {bad}")
+        data.update(overrides)
+        return cls(**data)
 
     def copy(self, **kw) -> "Config":
         return replace(self, **kw)

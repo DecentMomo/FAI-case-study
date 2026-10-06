@@ -75,6 +75,18 @@ class TestSearch(unittest.TestCase):
                 self.assertLess(g.dist(g.rooms[0], a), math.inf)          # connected
 
 
+class TestExtraSearch(unittest.TestCase):
+    def test_ida_optimal_and_greedy_not_better(self):
+        from search import ida_star, greedy_best_first
+        g = default_map()
+        for av in (False, True):
+            for a in g.rooms:
+                for b in g.rooms:
+                    opt = dijkstra(g, a, b, None, av).cost
+                    self.assertAlmostEqual(ida_star(g, a, b, "euclidean", None, av).cost, opt, places=6)
+                    self.assertGreaterEqual(greedy_best_first(g, a, b, "euclidean", None, av).cost, opt - 1e-9)
+
+
 class TestSuspicion(unittest.TestCase):
     def test_belief_is_a_distribution(self):
         cfg = Config()
@@ -150,6 +162,80 @@ class TestMissing(unittest.TestCase):
             if seen_unreported:
                 break
         self.assertTrue(seen_unreported)
+
+
+class TestImpostorRules(unittest.TestCase):
+    def test_kill_only_when_alone_with_victim(self):
+        import game_loop
+
+        class Checked(game_loop.Game):
+            kills = 0
+
+            def do_kill(self, imp, victim):
+                here = [c for c in self.alive_crew() if c.room == imp.room]
+                assert here == [victim], "impostor killed with a witness present"
+                Checked.kills += 1
+                super().do_kill(imp, victim)
+        for pol in ("minimax", "greedy", "random"):
+            for seed in range(15):
+                Checked(Config(seed=seed, impostor_policy=pol, compare_baselines=False)).run()
+        self.assertGreater(Checked.kills, 0)
+
+    def test_smart_impostor_never_vents_in_front_of_crew(self):
+        import game_loop
+
+        class Checked(game_loop.Game):
+            hops = 0
+
+            def depart(self, a, step):
+                if step[2] and a.role == "impostor":
+                    Checked.hops += 1
+                    assert not any(c.room == a.room for c in self.alive_crew()), "vented with a witness"
+                    assert not any(c.room == step[0] for c in self.alive_crew()), "vented into a watched room"
+                super().depart(a, step)
+        for seed in range(25):
+            Checked(Config(seed=seed, compare_baselines=False)).run()
+        self.assertGreater(Checked.hops, 0)
+
+
+class TestEngineering(unittest.TestCase):
+    def test_parallel_matches_serial(self):
+        import experiments as E
+        cfgs = [Config(seed=s, compare_baselines=False) for s in range(6)]
+        a = E.run_batch(cfgs, 1)
+        b = E.run_batch(cfgs, 2)
+        for x, y in zip(a, b):
+            for k in ("winner", "rounds", "ticks", "kills", "innocents"):
+                self.assertEqual(x[k], y[k])
+
+    def test_cautious_crew_beliefs_stay_distributions(self):
+        for seed in range(10):
+            r = run_game(Config(seed=seed, crew_policy="cautious", compare_baselines=False))
+            for m in r.meetings:
+                for b in m["beliefs"].values():
+                    self.assertAlmostEqual(sum(b.values()), 1.0, places=6)
+
+    def test_preset_loading(self):
+        import json, os, tempfile
+        d = tempfile.mkdtemp()
+        good, bad = os.path.join(d, "g.json"), os.path.join(d, "b.json")
+        with open(good, "w") as f:
+            json.dump({"n_crew": 5, "crew_policy": "cautious"}, f)
+        with open(bad, "w") as f:
+            json.dump({"not_a_field": 1}, f)
+        c = Config.from_json(good, seed=9)
+        self.assertEqual((c.n_crew, c.crew_policy, c.seed), (5, "cautious", 9))
+        with self.assertRaises(ValueError):
+            Config.from_json(bad)
+
+    def test_animation_renders_headless(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        from visualize import animate
+        r = run_game(Config(seed=3, record_frames=True, compare_baselines=False))
+        anim = animate(r, reveal=False, show=False)
+        for i in (0, len(r.frames) // 2, len(r.frames) - 1):
+            anim.draw_frame(i)
 
 
 if __name__ == "__main__":

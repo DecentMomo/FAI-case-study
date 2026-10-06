@@ -21,7 +21,7 @@ Python 3.9+ (developed on 3.13).
 
 ```bash
 pip install -r requirements.txt        # matplotlib, numpy, pillow
-python tests.py                        # 12 sanity checks (A* optimality, admissibility, determinism ...)
+python tests.py                        # 21 checks (A*/IDA* optimality, admissibility, impostor rules, determinism, parallel == serial ...)
 ```
 
 ## 2. How to run
@@ -40,12 +40,16 @@ python main.py run --impostor random            # dumb baseline 2: random wander
 python main.py run --crew 10 --rooms 24 --seed 4
 
 python main.py run --heuristic zero             # swap the A* heuristic (see below)
+python main.py run --crew-policy cautious       # crew flee / avoid their top suspect (belief-driven movement)
+python main.py run --config presets/big_map.json   # load a JSON preset (typed flags override it)
 python main.py trace --start Reactor --goal Navigation            # print the A* search tree
 python main.py trace --start Reactor --goal Navigation --vents --heuristic weighted
+python main.py trace --algo ida                 # IDA* (or --algo greedy) on the same query
 
 python main.py cases                            # find + log the working / edge cases -> outputs/cases/
 python main.py compare --games 200              # smart vs dumb impostor win rates
-python main.py experiments [--quick]            # all complexity/comparison studies -> CSV + PNG
+python main.py experiments [--quick] [--jobs 4] [--only ablation,belief]   # all studies -> CSV + PNG
+python make_figures.py                          # report/slide figures -> outputs/figures/ (map, A* tree, Minimax tree, beliefs)
 ```
 
 Everything can also be set from Python:
@@ -88,9 +92,13 @@ print(r.winner, r.reason, r.stats)
 | `impostor_ai.py` | Impostor brain: **Minimax-style evaluation**, greedy/random fall-backs, alibi lying, false-sighting "framing", voting |
 | `suspicion.py` | crew belief update rules, alibi-conflict detection, voting and tie handling |
 | `game_loop.py` | engine: task phase → discovery → meeting → resolution, win conditions, logging, frames |
-| `visualize.py` | matplotlib replay: graph, moving agents, suspicion heat-map, **chat box** (meeting discussion + chatter while walking) and event log, both scrollable (mouse wheel over the box; `F` = back to live; `SPACE` = pause) |
+| `visualize.py` | matplotlib replay (buttons Prev/Pause/Next/Next meeting, speed slider, vote arrows): graph, moving agents, suspicion heat-map, **chat box** (meeting discussion + chatter while walking) and event log, both scrollable (mouse wheel over the box; `F` = back to live; `SPACE` = pause) |
 | `scenarios.py` | seed sweep that **finds** the required working / edge cases and writes their logs |
 | `experiments.py` | heuristic study, scaling study, smart-vs-dumb study (CSV + PNG) |
+| `make_figures.py` | generates the report/slide figures (map, **A\* search tree**, **Minimax tree of a real decision**, belief evolution) |
+| `presets/*.json` | ready-made configs (`--config`) |
+| `docs/PEAS_and_properties.md` | PEAS, environment properties, agent types - each justified by a code fact |
+| `docs/report_map.md` | required report section -> evidence/commands, plus a viva Q&A cheat sheet |
 | `main.py` | CLI |
 | `tests.py` | unit tests |
 
@@ -119,6 +127,10 @@ print(r.winner, r.reason, r.stats)
 | `perfect` | yes | exact distance h\* — the best any heuristic can do (lower bound on expansions) |
 
 Admissibility/consistency and "A\* cost == Dijkstra cost" are verified in `tests.py` on three maps.
+
+**More baselines (report comparison).** `ida_star` (iterative-deepening A*: O(depth) memory but re-expands nodes) and
+`greedy_best_first` (priority = h only) are in `search.py`. On the 10-room map (all pairs, corridors only): A* 3.3 expansions,
+BFS/Dijkstra 6.0, IDA* 7.5 (and 3.1 memory units vs 3.8 for A*), greedy 3.1 but only 98 % optimal paths, BFS 93 % optimal.
 
 **Instrumentation.** Every A\* call is logged with the BFS and Dijkstra result for the *same* query
 (`search_log.csv`): `astar_expanded, astar_cost, bfs_expanded, bfs_cost, dij_expanded, ...`.
@@ -219,6 +231,23 @@ Typical outputs (seed numbers can change if you change any config value): `pytho
   Reference run (200 games): random 0.5 %, greedy 1 %, minimax 25.5 / 31 / 40.5 % impostor wins for depth 1/2/3 (with the missing-player rule, deeper search now pays off because the tree models "was I seen with the victim?").
   The dumb impostors are caught almost every time; most of the smart impostor's advantage comes from
   unwitnessed venting, unrefutable alibis and misdirection, and depth 1 vs 3 differs by about 15 points; the 95 % intervals still overlap for neighbouring depths, so quote them.
+
+### Further studies (all in `python main.py experiments`)
+* `belief_quality_study` - mean belief in the true impostor, top-suspect accuracy, Brier score, log-loss, a reliability curve
+  (`belief_quality.*`, `belief_calibration.csv`). Against the greedy impostor the top suspect is the true impostor in 198/200 games
+  (first meeting ~1.1); against the smart impostor in 124/200 (~1.8 meetings).
+* `ablation_study` - paired seeds, 300 games per variant, impostor win rate with CI (`ablation_study.*`). Reference run:
+  full model 39 %; removing the **alibi lies** -> 0 %; **unsafe venting** -> 14 %; no bandwagon voting -> 26 %; depth 1 -> 26 %;
+  no false sighting -> 36 %; no Minimax gate -> 35 % (within the CI). Crew side: removing proximity raises the impostor to 54 %,
+  perfect memory lowers it to 28 %. **Takeaway for the viva: the smart impostor's advantage comes mostly from unrefutable
+  lies and safe venting; the Minimax-style target/escape choice adds a smaller, but visible (depth 3 vs 1: +14 points) effect.**
+* `sensitivity_study` - crew win rate vs `w_alibi`, `w_prox`, `memory_prob`, `skip_factor`. `memory_prob` matters most
+  (0.85 -> 43 % crew wins, 1.0 -> 69 %); `w_alibi` alone barely changes the outcome.
+* `crew_policy_study` - belief-aware movement (`--crew-policy cautious`): flee from the top suspect when alone with them and
+  route A* around the room they were last seen in. Measured effect is small (impostor 39 % -> 34-38 %, kills/game 2.48 -> 2.37-2.46):
+  games are short and beliefs are still near uniform when the first kills happen, so avoidance rarely triggers
+  (about 1 flee move per game). Report it as such, not as a large effect.
+* Everything runs in parallel with `--jobs N`; results are identical to `--jobs 1`.
 
 ## 7. Modelling assumptions / limitations (be ready to state these)
 * Discrete ticks; agents see each other only inside a room at the end of a tick; the viewer is omniscient.

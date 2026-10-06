@@ -300,6 +300,17 @@ def apply_dissent(belief: Dict[str, float], dissenters: List[str], cfg) -> Dict[
     return normalize({x: math.exp(s - m) for x, s in sc.items()})
 
 
+def set_suspect(belief: Dict[str, float], x: str, p: float) -> Dict[str, float]:
+    """Immediate private update: put probability p on x, share the rest in proportion to the old belief."""
+    if x not in belief:
+        return belief
+    rest = {k: v for k, v in belief.items() if k != x}
+    tot = sum(rest.values()) or 1.0
+    out = {k: (1.0 - p) * v / tot for k, v in rest.items()}
+    out[x] = max(p, belief[x])
+    return normalize(out)
+
+
 def remove_agents(belief: Dict[str, float], gone: List[str]) -> Dict[str, float]:
     """Dead / ejected agents cannot be the impostor any more (impostor is alive until ejected)."""
     b = {x: p for x, p in belief.items() if x not in gone}
